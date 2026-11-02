@@ -6,6 +6,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { parseArguments } from "../src/cli.js";
+import { UserFacingError } from "../src/utils/diagnostics.js";
 import { Logger } from "../src/utils/logger.js";
 import { TransactionManager } from "../src/utils/transaction.js";
 import { VaultRegistry, sha256 } from "../src/utils/vault.js";
@@ -137,4 +138,178 @@ test("doctor and recovery CLI commands operate on an explicit vault", async () =
   ]);
   assert.equal((JSON.parse(restored.stdout) as { ok: boolean }).ok, true);
   assert.equal(await fs.readFile(target, "utf8"), "before");
+});
+
+function parseServe(
+  args: string[]
+): Exclude<ReturnType<typeof parseArguments>, "help" | "version"> {
+  const parsed = parseArguments(args);
+  if (typeof parsed === "string") assert.fail(`Expected parsed CLI options, got '${parsed}'.`);
+  return parsed;
+}
+
+function expectUsageError(run: () => unknown, code: string): void {
+  assert.throws(run, (error: unknown) => {
+    assert.ok(error instanceof UserFacingError, `Expected UserFacingError, got ${String(error)}`);
+    assert.equal(error.exitCode, 2);
+    assert.equal(error.diagnostic.code, code);
+    return true;
+  });
+}
+
+test("stdio serve defaults keep the HTTP transport disabled", () => {
+  const parsed = parseServe(["serve", "--vault", "notes=/tmp/vault"]);
+  assert.equal(parsed.transport, "stdio");
+  assert.equal(parsed.host, "127.0.0.1");
+  assert.equal(parsed.port, 8787);
+  assert.equal(parsed.httpPath, "/mcp");
+  assert.deepEqual(parsed.allowedHosts, []);
+  assert.deepEqual(parsed.allowedOrigins, []);
+  assert.equal(parsed.authToken, undefined);
+});
+
+test("HTTP transport flags parse, including repeatable allowed host and origin values", () => {
+  const parsed = parseServe([
+    "serve",
+    "--vault",
+    "notes=/tmp/vault",
+    "--transport",
+    "http",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "9000",
+    "--path",
+    "//mcp//",
+    "--allowed-host",
+    "notes.example.com",
+    "--allowed-host",
+    "[::1]",
+    "--allowed-origin",
+    "app.example.com",
+    "--auth-token",
+    "secret-token",
+    "--legacy",
+    "reject"
+  ]);
+  assert.equal(parsed.transport, "http");
+  assert.equal(parsed.host, "0.0.0.0");
+  assert.equal(parsed.port, 9000);
+  assert.equal(parsed.httpPath, "/mcp");
+  assert.deepEqual(parsed.allowedHosts, ["notes.example.com", "[::1]"]);
+  assert.deepEqual(parsed.allowedOrigins, ["app.example.com"]);
+  assert.equal(parsed.authToken, "secret-token");
+  assert.equal(parsed.legacy, "reject");
+  assert.ok(!parsed.canonicalArgs.includes("secret-token"));
+});
+
+test("bind hosts and allowed origins reject ports, schemes, and zone ids", () => {
+  for (const host of ["localhost:8787", "http://localhost", "fe80::1%eth0"]) {
+    expectUsageError(
+      () =>
+        parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http", "--host", host]),
+      "CLI_INVALID_HOST"
+    );
+  }
+  for (const origin of [
+    "https://*",
+    "http://*",
+    "app.example.com:8787",
+    "https://app.example.com"
+  ]) {
+    expectUsageError(
+      () =>
+        parseServe([
+          "serve",
+          "--vault",
+          "notes=/tmp/vault",
+          "--transport",
+          "http",
+          "--allowed-origin",
+          origin
+        ]),
+      "CLI_INVALID_ALLOWED_ORIGIN"
+    );
+  }
+});
+
+test("port 0 is accepted and out-of-range or non-numeric ports are rejected", () => {
+  const parsed = parseServe([
+    "serve",
+    "--vault",
+    "notes=/tmp/vault",
+    "--transport",
+    "http",
+    "--port",
+    "0"
+  ]);
+  assert.equal(parsed.port, 0);
+
+  for (const port of ["65536", "-1", "abc"]) {
+    expectUsageError(
+      () =>
+        parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http", "--port", port]),
+      "CLI_INVALID_PORT"
+    );
+  }
+});
+
+test("HTTP path must start with a slash", () => {
+  expectUsageError(
+    () =>
+      parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http", "--path", "mcp"]),
+    "CLI_INVALID_HTTP_PATH"
+  );
+
+  const parsed = parseServe([
+    "serve",
+    "--vault",
+    "notes=/tmp/vault",
+    "--transport",
+    "http",
+    "--path",
+    "/mcp"
+  ]);
+  assert.equal(parsed.httpPath, "/mcp");
+});
+
+test("HTTP-only options require --transport http", () => {
+  expectUsageError(
+    () => parseServe(["serve", "--vault", "notes=/tmp/vault", "--port", "9000"]),
+    "CLI_HTTP_OPTION_WITHOUT_HTTP"
+  );
+});
+
+test("HTTP options are rejected on non-serve commands", () => {
+  expectUsageError(
+    () => parseServe(["doctor", "--vault", "notes=/tmp/vault", "--transport", "http"]),
+    "CLI_HTTP_OPTION_WITHOUT_HTTP"
+  );
+});
+
+test("auth token flag wins and the environment variable is a fallback", () => {
+  const previous = process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+  try {
+    process.env.OBSIDIAN_MCP_HTTP_TOKEN = "env-token";
+    const fromEnv = parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http"]);
+    assert.equal(fromEnv.authToken, "env-token");
+
+    const fromFlag = parseServe([
+      "serve",
+      "--vault",
+      "notes=/tmp/vault",
+      "--transport",
+      "http",
+      "--auth-token",
+      "flag-token"
+    ]);
+    assert.equal(fromFlag.authToken, "flag-token");
+
+    process.env.OBSIDIAN_MCP_HTTP_TOKEN = "";
+    const emptyEnv = parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http"]);
+    assert.equal(emptyEnv.authToken, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+    else process.env.OBSIDIAN_MCP_HTTP_TOKEN = previous;
+  }
 });

@@ -10,6 +10,7 @@ import {
   MAX_VAULTS,
   SERVER_VERSION
 } from "./constants.js";
+import { startHttpServer } from "./http.js";
 import { Runtime } from "./runtime.js";
 import { buildServer } from "./server.js";
 import {
@@ -23,6 +24,10 @@ import { VaultRegistry, type VaultDefinition } from "./utils/vault.js";
 
 type Command = "serve" | "doctor" | "recovery-list" | "recovery-restore";
 
+const DEFAULT_HTTP_HOST = "127.0.0.1";
+const DEFAULT_HTTP_PORT = 8787;
+const DEFAULT_HTTP_PATH = "/mcp";
+
 interface CliOptions {
   command: Command;
   vaults: VaultDefinition[];
@@ -30,9 +35,16 @@ interface CliOptions {
   recoveryMaxBytes: number;
   logLevel: LogLevel;
   legacy: "serve" | "reject";
+  transport: "stdio" | "http";
+  host: string;
+  port: number;
+  httpPath: string;
+  allowedHosts: string[];
+  allowedOrigins: string[];
   canonicalArgs: string[];
   warnings: Diagnostic[];
   recoveryId?: string;
+  authToken?: string;
 }
 
 export async function runCli(args: string[] = process.argv.slice(2)): Promise<void> {
@@ -101,6 +113,39 @@ export async function runCli(args: string[] = process.argv.slice(2)): Promise<vo
     process.stdout.write(
       `${JSON.stringify({ ok: true, transaction_id: transactionId }, null, 2)}\n`
     );
+    return;
+  }
+
+  if (parsed.command === "serve" && parsed.transport === "http") {
+    const handle = await startHttpServer({
+      runtime,
+      host: parsed.host,
+      port: parsed.port,
+      path: parsed.httpPath,
+      legacy: parsed.legacy,
+      allowedHosts: parsed.allowedHosts,
+      allowedOrigins: parsed.allowedOrigins,
+      logger,
+      ...(parsed.authToken === undefined ? {} : { authToken: parsed.authToken })
+    });
+    let closing = false;
+    const close = async (signal: string): Promise<void> => {
+      if (closing) return;
+      closing = true;
+      logger.log("info", "server_stopping", { signal });
+      await handle.close();
+    };
+    const onSignal = (signal: string): void => {
+      void close(signal).catch((error: unknown) => {
+        logger.log("error", "server_stop_failed", {
+          signal,
+          message: error instanceof Error ? error.message : String(error)
+        });
+        process.exitCode = 1;
+      });
+    };
+    process.once("SIGINT", () => onSignal("SIGINT"));
+    process.once("SIGTERM", () => onSignal("SIGTERM"));
     return;
   }
 
@@ -194,6 +239,14 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
   let recoveryMaxBytes = DEFAULT_RECOVERY_BYTES;
   let logLevel: LogLevel = "info";
   let legacy: CliOptions["legacy"] = "serve";
+  let transport: CliOptions["transport"] = "stdio";
+  let host = DEFAULT_HTTP_HOST;
+  let port = DEFAULT_HTTP_PORT;
+  let httpPath = DEFAULT_HTTP_PATH;
+  const allowedHosts: string[] = [];
+  const allowedOrigins: string[] = [];
+  let authTokenFlag: string | undefined;
+  let httpOptionUsed: string | undefined;
   let recoveryId: string | undefined;
   let sawVaultFlag = false;
   const canonicalArgs = commandArgs(command);
@@ -259,6 +312,59 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
         "Use '--legacy serve' for broad compatibility or '--legacy reject' for modern-only clients.",
         "legacy-mcp-clients"
       );
+    } else if (
+      flag === "--transport" ||
+      flag === "--host" ||
+      flag === "--port" ||
+      flag === "--path" ||
+      flag === "--allowed-host" ||
+      flag === "--allowed-origin" ||
+      flag === "--auth-token"
+    ) {
+      if (command !== "serve") throw httpFlagRequiresServe(command, flag);
+      if (flag === "--transport") {
+        if (!isTransport(value)) {
+          throw usageError(
+            "CLI_INVALID_TRANSPORT",
+            "The transport is invalid.",
+            value,
+            "Use '--transport stdio' for MCP clients that launch the server, or '--transport http' for a Streamable HTTP endpoint.",
+            "streamable-http"
+          );
+        }
+        transport = value;
+        canonicalArgs.push(flag, value);
+        continue;
+      }
+      httpOptionUsed ??= flag;
+      if (flag === "--host") {
+        host = parseBindHost(value);
+        canonicalArgs.push(flag, host);
+      } else if (flag === "--port") {
+        port = parsePort(value);
+        canonicalArgs.push(flag, String(port));
+      } else if (flag === "--path") {
+        httpPath = parseHttpPath(value);
+        canonicalArgs.push(flag, httpPath);
+      } else if (flag === "--allowed-host") {
+        allowedHosts.push(parseAllowedHost(value));
+        canonicalArgs.push(flag, value);
+      } else if (flag === "--allowed-origin") {
+        allowedOrigins.push(parseAllowedOrigin(value));
+        canonicalArgs.push(flag, value);
+      } else if (flag === "--auth-token") {
+        if (value.length === 0) {
+          throw usageError(
+            "CLI_INVALID_AUTH_TOKEN",
+            "The auth token is empty.",
+            flag,
+            "Supply a non-empty token after --auth-token, or unset OBSIDIAN_MCP_HTTP_TOKEN.",
+            "streamable-http"
+          );
+        }
+        authTokenFlag = value;
+        // Never place secrets in canonicalArgs (they appear in diagnostics output).
+      }
     } else if (flag === "--id") {
       recoveryId = value;
       canonicalArgs.push(flag, value);
@@ -269,6 +375,13 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
         "--recovery-max-bytes",
         "--log-level",
         "--legacy",
+        "--transport",
+        "--host",
+        "--port",
+        "--path",
+        "--allowed-host",
+        "--allowed-origin",
+        "--auth-token",
         "--id"
       ]);
       throw usageError(
@@ -280,6 +393,23 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
       );
     }
   }
+  if (command === "serve" && transport === "stdio" && httpOptionUsed !== undefined) {
+    throw usageError(
+      "CLI_HTTP_OPTION_WITHOUT_HTTP",
+      "HTTP options require the Streamable HTTP transport.",
+      httpOptionUsed,
+      [
+        `Add '--transport http' to serve over Streamable HTTP, or remove ${httpOptionUsed}.`,
+        "Use --transport stdio (the default) for MCP clients that launch the server."
+      ],
+      "streamable-http"
+    );
+  }
+  const envToken = process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+  const authToken =
+    transport === "http"
+      ? (authTokenFlag ?? (envToken !== undefined && envToken.length > 0 ? envToken : undefined))
+      : undefined;
   if (vaults.length === 0) {
     throw usageError(
       "CLI_VAULT_REQUIRED",
@@ -305,9 +435,16 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
     recoveryMaxBytes,
     logLevel,
     legacy,
+    transport,
+    host,
+    port,
+    httpPath,
+    allowedHosts,
+    allowedOrigins,
     canonicalArgs,
     warnings: [],
-    ...(recoveryId === undefined ? {} : { recoveryId })
+    ...(recoveryId === undefined ? {} : { recoveryId }),
+    ...(authToken === undefined ? {} : { authToken })
   };
 }
 
@@ -347,6 +484,12 @@ function parseLegacyPositional(args: string[]): CliOptions {
     recoveryMaxBytes: DEFAULT_RECOVERY_BYTES,
     logLevel: "info",
     legacy: "serve",
+    transport: "stdio",
+    host: DEFAULT_HTTP_HOST,
+    port: DEFAULT_HTTP_PORT,
+    httpPath: DEFAULT_HTTP_PATH,
+    allowedHosts: [],
+    allowedOrigins: [],
     canonicalArgs,
     warnings: [
       {
@@ -511,6 +654,122 @@ function isLegacyMode(value: string): value is CliOptions["legacy"] {
   return value === "serve" || value === "reject";
 }
 
+function isTransport(value: string): value is CliOptions["transport"] {
+  return value === "stdio" || value === "http";
+}
+
+function httpFlagRequiresServe(command: Command, flag: string): UserFacingError {
+  return usageError(
+    "CLI_HTTP_OPTION_WITHOUT_HTTP",
+    "HTTP options are only supported by the serve command.",
+    `${flag} was supplied to '${commandArgs(command).join(" ")}'.`,
+    [
+      `Remove ${flag}, or run the serve command with '--transport http'.`,
+      `Use: ${argsForDisplay([...commandArgs("serve"), "--transport", "http", "--vault", "notes=/absolute/path"])}`
+    ],
+    "streamable-http"
+  );
+}
+
+function parseBindHost(value: string): string {
+  const trimmed = value.trim();
+  const hostWithPort = /^[^:]+:\d+$/u.test(trimmed);
+  if (
+    trimmed.length === 0 ||
+    /[\s/?#%]/u.test(trimmed) ||
+    trimmed.includes("://") ||
+    hostWithPort
+  ) {
+    throw usageError(
+      "CLI_INVALID_HOST",
+      "The bind host is invalid.",
+      value,
+      "Use a hostname or IP address without a port, for example 127.0.0.1, localhost, or ::1.",
+      "streamable-http"
+    );
+  }
+  return trimmed;
+}
+
+function parsePort(value: string): number {
+  if (!/^\d+$/u.test(value)) {
+    throw invalidPort(value);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 65535) {
+    throw invalidPort(value);
+  }
+  return parsed;
+}
+
+function invalidPort(value: string): UserFacingError {
+  return usageError(
+    "CLI_INVALID_PORT",
+    "The HTTP port is invalid.",
+    value,
+    "Use a whole number between 0 and 65535 (0 selects an ephemeral port).",
+    "streamable-http"
+  );
+}
+
+function parseHttpPath(value: string): string {
+  if (!value.startsWith("/") || /[\s?#]/u.test(value)) {
+    throw usageError(
+      "CLI_INVALID_HTTP_PATH",
+      "The HTTP endpoint path is invalid.",
+      value,
+      "Use a path that starts with '/', contains no whitespace, query, or fragment, for example /mcp.",
+      "streamable-http"
+    );
+  }
+  const segments = value.split("/").filter((segment) => segment.length > 0);
+  return segments.length === 0 ? "/" : `/${segments.join("/")}`;
+}
+
+function parseAllowedHost(value: string): string {
+  const trimmed = value.trim();
+  const bracketedIpv6 = /^\[[0-9a-f:.]+\]$/iu.test(trimmed);
+  if (
+    trimmed.length === 0 ||
+    /[\s/?#]/u.test(trimmed) ||
+    trimmed.includes("://") ||
+    (trimmed.includes(":") && !bracketedIpv6)
+  ) {
+    throw usageError(
+      "CLI_INVALID_ALLOWED_HOST",
+      "The allowed host is invalid.",
+      value,
+      "Use a bare hostname without a scheme or port (for example notes.example.com, or [::1] for IPv6).",
+      "streamable-http"
+    );
+  }
+  return trimmed;
+}
+
+function parseAllowedOrigin(value: string): string {
+  const trimmed = value.trim();
+  const bracketedIpv6 = /^\[[0-9a-f:.]+\]$/iu.test(trimmed);
+  if (
+    trimmed.length === 0 ||
+    /[\s/?#]/u.test(trimmed) ||
+    trimmed.includes("://") ||
+    (trimmed.includes(":") && !bracketedIpv6)
+  ) {
+    throw invalidAllowedOrigin(value);
+  }
+  return trimmed;
+}
+
+function invalidAllowedOrigin(value: string): UserFacingError {
+  return usageError(
+    "CLI_INVALID_ALLOWED_ORIGIN",
+    "The allowed origin is invalid.",
+    value,
+    "Use a bare hostname without a scheme or port, for example localhost, 192.168.1.10, or [::1].",
+    "streamable-http"
+  );
+}
+
 function closest(value: string, candidates: readonly string[]): string {
   return [...candidates].sort((a, b) => editDistance(value, a) - editDistance(value, b))[0] ?? "";
 }
@@ -540,7 +799,7 @@ function helpText(): string {
   return `obsidian-mcp ${SERVER_VERSION}
 
 Usage:
-  obsidian-mcp serve --vault <id>=<absolute-path> [--vault ...] [--legacy serve|reject]
+  obsidian-mcp serve --vault <id>=<absolute-path> [--vault ...] [--transport stdio|http] [--legacy serve|reject]
   obsidian-mcp doctor --vault <id>=<absolute-path> [--vault ...]
   obsidian-mcp recovery list --vault <id>=<absolute-path> [--vault ...]
   obsidian-mcp recovery restore --vault <id>=<absolute-path> --id <transaction-id>
@@ -556,5 +815,17 @@ Options:
   --legacy <mode>              2025-era client handling: serve (default) or reject
   --help                       Show help
   --version                    Show version
+
+HTTP transport options (serve only, with --transport http):
+  --transport <mode>           stdio (default) or http
+  --host <host>                Bind address (default: 127.0.0.1)
+  --port <port>                TCP port, 0 selects an ephemeral port (default: 8787)
+  --path <path>                Endpoint path (default: /mcp)
+  --allowed-host <hostname>    Extra allowed Host header value (repeatable)
+  --allowed-origin <origin>    Extra allowed Origin hostname (repeatable)
+  --auth-token <token>         Require Authorization: Bearer <token>
+                               (falls back to OBSIDIAN_MCP_HTTP_TOKEN when omitted)
+
+  Note: 2025-era HTTP requests are served statelessly; GET and DELETE return 405.
 `;
 }

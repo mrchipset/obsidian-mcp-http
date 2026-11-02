@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A safe, local MCP server for working with Obsidian vaults",
   "type": "module",
   "main": "dist/main.js",
@@ -54,7 +54,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "yaml": "^2.8.1",
     "zod": "^4.2.0"
   },
@@ -67,5 +68,6 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.0.0"
-  }
+  },
+  "packageManager": "pnpm@10.25.0+sha512.5e82639027af37cf832061bcc6d639c219634488e0f2baebe785028a793de7b525ffcd3f7ff574f5e9860654e098fe852ba8ac5dd5cefe1767d23a020a92f501"
 }

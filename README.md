@@ -2,7 +2,7 @@
 
 A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults.
 
-Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open. Legacy protocol and v1 positional-path compatibility are deprecated and print exact migration instructions to stderr.
+Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and requires Node.js 22 or newer. It serves stdio by default and can opt into a local Streamable HTTP transport. It works directly with Markdown files, so Obsidian does not need to be open. Legacy protocol and v1 positional-path compatibility are deprecated and print exact migration instructions to stderr.
 
 > [!IMPORTANT]
 > MCP clients can invoke destructive tools. Back up important vaults, review client permission prompts, and use revision preconditions for concurrently edited notes.
@@ -54,12 +54,77 @@ obsidian-mcp serve \
 
 Network, removable, hidden, and synced locations are allowed because an explicit `--vault` is treated as authorization; the same containment protections apply to every location.
 
+## Streamable HTTP transport
+
+stdio remains the default. Enable Streamable HTTP explicitly with `--transport http`:
+
+```bash
+npx -y obsidian-mcp@2 serve --vault notes=/absolute/path/to/vault --transport http
+```
+
+The server listens on `http://127.0.0.1:8787/mcp` by default. Point an MCP client at that URL:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "url": "http://127.0.0.1:8787/mcp"
+    }
+  }
+}
+```
+
+To require a bearer token, start the server with `--auth-token` or set `OBSIDIAN_MCP_HTTP_TOKEN` in the server's environment, then send the same value as a header from the client:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-token>"
+      }
+    }
+  }
+}
+```
+
+`OBSIDIAN_MCP_HTTP_TOKEN` configures the server only. MCP client configuration files are not shell scripts, so substitute the token literally (or use your client's own secret expansion) instead of writing `$OBSIDIAN_MCP_HTTP_TOKEN` in the header.
+
+| Flag                        | Default        | Purpose                                                           |
+| --------------------------- | -------------- | ----------------------------------------------------------------- |
+| `--transport <stdio\|http>` | `stdio`        | Serve over stdio or Streamable HTTP.                              |
+| `--host <host>`             | `127.0.0.1`    | Network interface to bind.                                        |
+| `--port <port>`             | `8787`         | TCP port. `0` selects an ephemeral port and reports it on stderr. |
+| `--path <path>`             | `/mcp`         | HTTP endpoint path.                                               |
+| `--allowed-host <hostname>` | loopback names | Additional accepted `Host` hostnames (repeatable).                |
+| `--allowed-origin <origin>` | loopback names | Additional accepted `Origin` hostnames (repeatable).              |
+| `--auth-token <token>`      | none           | Require `Authorization: Bearer <token>` on non-OPTIONS requests.  |
+| `OBSIDIAN_MCP_HTTP_TOKEN`   | none           | Environment alternative to `--auth-token`.                        |
+
+HTTP security notes:
+
+- The server binds to loopback by default. Bind another interface only when you intend to accept remote connections.
+- `Host` and `Origin` validation default to localhost and loopback names, which blocks DNS-rebinding attacks. Add `--allowed-host` or `--allowed-origin` only for trusted names. When binding a wildcard address such as `0.0.0.0` or `::`, also pass the public hostname with `--allowed-host`, otherwise requests addressed to it are rejected.
+- Origin matching is hostname-based and ignores scheme and port, so any page served from an allowed hostname can call the endpoint. Configure a bearer token before relying on origin checks alone.
+- HTTP clients are not authenticated unless `--auth-token` or `OBSIDIAN_MCP_HTTP_TOKEN` is configured. Use a token and a reverse proxy with TLS before exposing the endpoint beyond this machine.
+- In the default `--legacy serve` mode, 2025-era clients are served per request without session state; `GET` and `DELETE` on the endpoint return `405`.
+
+Smoke-test the endpoint with `curl`:
+
+```bash
+curl -i http://127.0.0.1:8787/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'
+```
+
 ## Design principles
 
 - Vault access is explicitly allowlisted at process startup.
 - Every tool path is vault-relative, segment-checked, and blocked from symlinks and reserved state.
 - File mutations are journaled, conflict-checked, atomically replaced, and rolled back as one transaction.
-- The server never listens on a network interface or sends telemetry.
+- The server does not send telemetry. It uses stdio unless the HTTP transport is explicitly enabled, in which case it binds loopback by default.
 - stdout is reserved exclusively for MCP messages; structured diagnostics go to stderr.
 - Results are bounded, paginated where appropriate, and available as both text and structured content.
 
