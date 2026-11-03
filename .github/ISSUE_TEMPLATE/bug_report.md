@@ -21,7 +21,7 @@ Steps to reproduce the behavior:
 A clear and concise description of what you expected to happen.
 
 **Diagnostics and logs (if available)**
-Run `obsidian-mcp doctor` with the same `--vault` arguments and include its sanitized output. Include stderr logs, but remove personal paths and vault content first. Never paste MCP stdio traffic containing note data.
+Run `obsidian-mcp doctor` with the same `--vault` arguments and include its sanitized output. Include stderr logs, but remove personal paths and vault content first. Never paste MCP traffic (stdio or HTTP) containing note data.
 
 **Environment (please complete the following information):**
 - OS and version: [e.g. Windows 11, macOS 15, Ubuntu 24.04]

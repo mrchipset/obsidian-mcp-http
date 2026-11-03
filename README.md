@@ -1,6 +1,6 @@
 # Obsidian MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults over stdio or Streamable HTTP.
 
 Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and requires Node.js 22 or newer. It serves stdio by default and can opt into a local Streamable HTTP transport. It works directly with Markdown files, so Obsidian does not need to be open. Legacy protocol and v1 positional-path compatibility are deprecated and print exact migration instructions to stderr.
 
@@ -139,7 +139,7 @@ Then point clients at `http://127.0.0.1:8787/mcp` with the same bearer token. Th
 - Every tool path is vault-relative, segment-checked, and blocked from symlinks and reserved state.
 - File mutations are journaled, conflict-checked, atomically replaced, and rolled back as one transaction.
 - The server does not send telemetry. It uses stdio unless the HTTP transport is explicitly enabled, in which case it binds loopback by default.
-- stdout is reserved exclusively for MCP messages; structured diagnostics go to stderr.
+- In stdio mode, stdout is reserved exclusively for MCP messages; structured diagnostics go to stderr.
 - Results are bounded, paginated where appropriate, and available as both text and structured content.
 
 ## Tools

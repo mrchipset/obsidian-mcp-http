@@ -1,7 +1,7 @@
 {
   "name": "obsidian-mcp",
   "version": "2.1.0",
-  "description": "A safe, local MCP server for working with Obsidian vaults",
+  "description": "A safe, local MCP server for working with Obsidian vaults over stdio or Streamable HTTP",
   "type": "module",
   "main": "dist/main.js",
   "bin": {
@@ -39,7 +39,8 @@
     "model-context-protocol",
     "ai",
     "notes",
-    "knowledge-management"
+    "knowledge-management",
+    "streamable-http"
   ],
   "author": "Steven Stavrakis",
   "license": "MIT",
