@@ -119,6 +119,20 @@ curl -i http://127.0.0.1:8787/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'
 ```
 
+## Docker
+
+Build the image and run the HTTP transport. A container must bind `0.0.0.0`, because the CLI defaults to loopback:
+
+```bash
+docker build -t obsidian-mcp .
+docker run --rm -p 8787:8787 \
+  -v /absolute/path/to/vault:/vault \
+  -e OBSIDIAN_MCP_HTTP_TOKEN=replace-me \
+  obsidian-mcp serve --vault notes=/vault --transport http --host 0.0.0.0
+```
+
+Then point clients at `http://127.0.0.1:8787/mcp` with the same bearer token. The image runs as the unprivileged `node` user (uid 1000), so the mounted vault must be readable and writable by that uid. Add `--allowed-host <hostname>` when clients address the container by a name other than localhost or 127.0.0.1. Binding `0.0.0.0` without a token exposes the vault tools to the container network.
+
 ## Design principles
 
 - Vault access is explicitly allowlisted at process startup.

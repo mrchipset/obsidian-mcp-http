@@ -1,0 +1,10 @@
+.git
+.github
+.slim
+node_modules
+dist
+test
+evaluations
+docs
+coverage
+*.log
