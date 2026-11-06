@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import { promisify } from "node:util";
 
 import { parseArguments } from "../src/cli.js";
@@ -13,6 +13,11 @@ import { VaultRegistry, sha256 } from "../src/utils/vault.js";
 import { createVault } from "./helpers.js";
 
 const run = promisify(execFile);
+
+// MCP_API_KEY is often present in deployment shells; keep parsing tests deterministic.
+beforeEach(() => {
+  delete process.env.MCP_API_KEY;
+});
 
 test("startup failures never write non-MCP output to stdout", async () => {
   await assert.rejects(
@@ -261,6 +266,20 @@ test("HTTP path must start with a slash", () => {
     "CLI_INVALID_HTTP_PATH"
   );
 
+  expectUsageError(
+    () =>
+      parseServe([
+        "serve",
+        "--vault",
+        "notes=/tmp/vault",
+        "--transport",
+        "http",
+        "--path",
+        "/upload"
+      ]),
+    "CLI_INVALID_HTTP_PATH"
+  );
+
   const parsed = parseServe([
     "serve",
     "--vault",
@@ -311,5 +330,45 @@ test("auth token flag wins and the environment variable is a fallback", () => {
   } finally {
     if (previous === undefined) delete process.env.OBSIDIAN_MCP_HTTP_TOKEN;
     else process.env.OBSIDIAN_MCP_HTTP_TOKEN = previous;
+  }
+});
+
+test("MCP_API_KEY is accepted after the explicit token variables", () => {
+  const previousObsidian = process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+  const previousKey = process.env.MCP_API_KEY;
+  try {
+    delete process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+    process.env.MCP_API_KEY = "api-key";
+    const fromApiKey = parseServe(["serve", "--vault", "notes=/tmp/vault", "--transport", "http"]);
+    assert.equal(fromApiKey.authToken, "api-key");
+
+    process.env.OBSIDIAN_MCP_HTTP_TOKEN = "obsidian-token";
+    const fromObsidian = parseServe([
+      "serve",
+      "--vault",
+      "notes=/tmp/vault",
+      "--transport",
+      "http"
+    ]);
+    assert.equal(fromObsidian.authToken, "obsidian-token");
+
+    const fromFlag = parseServe([
+      "serve",
+      "--vault",
+      "notes=/tmp/vault",
+      "--transport",
+      "http",
+      "--auth-token",
+      "flag-token"
+    ]);
+    assert.equal(fromFlag.authToken, "flag-token");
+
+    const stdioUsage = parseServe(["serve", "--vault", "notes=/tmp/vault"]);
+    assert.equal(stdioUsage.authToken, undefined);
+  } finally {
+    if (previousObsidian === undefined) delete process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+    else process.env.OBSIDIAN_MCP_HTTP_TOKEN = previousObsidian;
+    if (previousKey === undefined) delete process.env.MCP_API_KEY;
+    else process.env.MCP_API_KEY = previousKey;
   }
 });

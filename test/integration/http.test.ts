@@ -230,8 +230,12 @@ function modernClient(name: string): Client {
 }
 
 async function startServer(extraArgs: string[]): Promise<RunningServer> {
+  const env = { ...process.env };
+  delete env.OBSIDIAN_MCP_HTTP_TOKEN;
+  delete env.MCP_API_KEY;
   const child = spawn(process.execPath, ["dist/main.js", "serve", ...extraArgs, "--port", "0"], {
     cwd: process.cwd(),
+    env,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const stderr = capture(child.stderr);

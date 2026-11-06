@@ -406,9 +406,12 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
     );
   }
   const envToken = process.env.OBSIDIAN_MCP_HTTP_TOKEN;
+  const mcpApiKey = process.env.MCP_API_KEY;
   const authToken =
     transport === "http"
-      ? (authTokenFlag ?? (envToken !== undefined && envToken.length > 0 ? envToken : undefined))
+      ? (authTokenFlag ??
+        (envToken !== undefined && envToken.length > 0 ? envToken : undefined) ??
+        (mcpApiKey !== undefined && mcpApiKey.length > 0 ? mcpApiKey : undefined))
       : undefined;
   if (vaults.length === 0) {
     throw usageError(
@@ -723,7 +726,17 @@ function parseHttpPath(value: string): string {
     );
   }
   const segments = value.split("/").filter((segment) => segment.length > 0);
-  return segments.length === 0 ? "/" : `/${segments.join("/")}`;
+  const normalized = segments.length === 0 ? "/" : `/${segments.join("/")}`;
+  if (normalized === "/upload") {
+    throw usageError(
+      "CLI_INVALID_HTTP_PATH",
+      "The '/upload' path is reserved for asset uploads.",
+      value,
+      "Choose a different --path, for example /mcp.",
+      "streamable-http"
+    );
+  }
+  return normalized;
 }
 
 function parseAllowedHost(value: string): string {
@@ -824,7 +837,12 @@ HTTP transport options (serve only, with --transport http):
   --allowed-host <hostname>    Extra allowed Host header value (repeatable)
   --allowed-origin <origin>    Extra allowed Origin hostname (repeatable)
   --auth-token <token>         Require Authorization: Bearer <token>
-                               (falls back to OBSIDIAN_MCP_HTTP_TOKEN when omitted)
+                               (falls back to OBSIDIAN_MCP_HTTP_TOKEN, then MCP_API_KEY)
+
+  Asset endpoints (with --transport http):
+  POST /upload                 multipart/form-data: vault, path, file, overwrite
+                               Requires the same bearer token
+  Resources                    obsidian-mcp://vaults/{vaultId}/files/{path}
 
   Note: 2025-era HTTP requests are served statelessly; GET and DELETE return 405.
 `;

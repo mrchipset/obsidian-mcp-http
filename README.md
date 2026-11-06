@@ -76,7 +76,7 @@ The server listens on `http://127.0.0.1:8787/mcp` by default. Point an MCP clien
 }
 ```
 
-To require a bearer token, start the server with `--auth-token` or set `OBSIDIAN_MCP_HTTP_TOKEN` in the server's environment, then send the same value as a header from the client:
+To require a bearer token, start the server with `--auth-token` or set `OBSIDIAN_MCP_HTTP_TOKEN` (or `MCP_API_KEY`) in the server's environment, then send the same value as a header from the client:
 
 ```json
 {
@@ -102,14 +102,14 @@ To require a bearer token, start the server with `--auth-token` or set `OBSIDIAN
 | `--allowed-host <hostname>` | loopback names | Additional accepted `Host` hostnames (repeatable).                |
 | `--allowed-origin <origin>` | loopback names | Additional accepted `Origin` hostnames (repeatable).              |
 | `--auth-token <token>`      | none           | Require `Authorization: Bearer <token>` on non-OPTIONS requests.  |
-| `OBSIDIAN_MCP_HTTP_TOKEN`   | none           | Environment alternative to `--auth-token`.                        |
+| `OBSIDIAN_MCP_HTTP_TOKEN`   | none           | Env alternative to `--auth-token`; `MCP_API_KEY` also works.      |
 
 HTTP security notes:
 
 - The server binds to loopback by default. Bind another interface only when you intend to accept remote connections.
 - `Host` and `Origin` validation default to localhost and loopback names, which blocks DNS-rebinding attacks. Add `--allowed-host` or `--allowed-origin` only for trusted names. When binding a wildcard address such as `0.0.0.0` or `::`, also pass the public hostname with `--allowed-host`, otherwise requests addressed to it are rejected.
 - Origin matching is hostname-based and ignores scheme and port, so any page served from an allowed hostname can call the endpoint. Configure a bearer token before relying on origin checks alone.
-- HTTP clients are not authenticated unless `--auth-token` or `OBSIDIAN_MCP_HTTP_TOKEN` is configured. Use a token and a reverse proxy with TLS before exposing the endpoint beyond this machine.
+- HTTP clients are not authenticated unless `--auth-token`, `OBSIDIAN_MCP_HTTP_TOKEN`, or `MCP_API_KEY` is configured. Use a token and a reverse proxy with TLS before exposing the endpoint beyond this machine.
 - In the default `--legacy serve` mode, 2025-era clients are served per request without session state; `GET` and `DELETE` on the endpoint return `405`.
 
 Smoke-test the endpoint with `curl`:
@@ -120,6 +120,73 @@ curl -i http://127.0.0.1:8787/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'
 ```
+
+## Vault files and uploads
+
+### Read files as MCP resources
+
+The HTTP and stdio transports register one resource template, discoverable through `resources/templates/list`:
+
+```text
+obsidian-mcp://vaults/{vaultId}/files/{vault relative path}
+```
+
+For example, `obsidian-mcp://vaults/notes/files/publish/wechat-main/assets/demo/cover.png`.
+
+- Text files (`.md`, `.txt`, `.json`, `.yaml`, `.csv`, `.html`, `.xml`, and similar) are returned as `text`.
+- `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/svg+xml`, and `application/pdf` are returned as base64 `blob` content with the matching `mimeType`.
+- Reads are read-only, reuse the same vault path validation as the tools, and are capped by `RESOURCE_MAX_BYTES` (default 10 MB). Missing files and oversized reads return MCP resource errors with actionable messages.
+- The existing `obsidian-mcp://vaults` resource is unchanged.
+
+### Upload files over HTTP
+
+`POST /upload` accepts `multipart/form-data` on the same HTTP server and requires the same bearer token as MCP:
+
+| Field       | Required | Description                                            |
+| ----------- | -------- | ------------------------------------------------------ |
+| `vault`     | yes      | Vault id, for example `notes`.                         |
+| `path`      | yes      | Vault-relative target path including the filename.     |
+| `file`      | yes      | File contents.                                         |
+| `overwrite` | no       | `true` replaces an existing file; defaults to `false`. |
+
+```bash
+export MCP_API_KEY=replace-me
+curl -sS -X POST http://127.0.0.1:8811/upload \
+  -H "Authorization: Bearer $MCP_API_KEY" \
+  -F vault=notes \
+  -F "path=publish/wechat-main/assets/demo/cover.png" \
+  -F file=@./cover.png
+```
+
+A successful upload returns the normalized path, byte count, SHA-256, and detected MIME type:
+
+```json
+{
+  "vault": "notes",
+  "path": "publish/wechat-main/assets/demo/cover.png",
+  "bytes": 12345,
+  "sha256": "…",
+  "mimeType": "image/png"
+}
+```
+
+Behavior and limits:
+
+- Allowed types are PNG, JPEG, WebP, GIF, SVG, and PDF; other extensions return `415`.
+- `UPLOAD_MAX_BYTES` sets the request limit (default 20 MB). Larger bodies return `413`.
+- Missing parent directories are created. Files are written to a temporary file in the same directory and renamed into place, with mode `0644` on POSIX.
+- Existing files are preserved unless `overwrite=true`; a conflict returns `409`.
+- Paths are validated exactly like tool paths: absolute paths, `..`, backslashes, `.obsidian`, `.obsidian-mcp`, and other reserved roots return `400`.
+- Without a configured token, `/upload` always returns `401`. The server must listen over HTTP for the route to exist (`--transport http`, optionally `--port 8811` for the examples above).
+
+| Status | Meaning                                               |
+| ------ | ----------------------------------------------------- |
+| `400`  | Missing/invalid fields, unsafe path, or bad multipart |
+| `401`  | Missing or incorrect bearer token                     |
+| `404`  | Vault id is not configured                            |
+| `409`  | Target exists and `overwrite=true` was not sent       |
+| `413`  | Body exceeds `UPLOAD_MAX_BYTES`                       |
+| `415`  | File extension is outside the allowed MIME list       |
 
 ## Docker
 

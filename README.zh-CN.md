@@ -76,7 +76,7 @@ npx -y obsidian-mcp@2 serve --vault notes=/absolute/path/to/vault --transport ht
 }
 ```
 
-如需强制 Bearer Token，启动服务器时传入 `--auth-token`，或在服务器环境中设置 `OBSIDIAN_MCP_HTTP_TOKEN`，然后在客户端发送相同的值：
+如需强制 Bearer Token，启动服务器时传入 `--auth-token`，或在服务器环境中设置 `OBSIDIAN_MCP_HTTP_TOKEN`（也支持 `MCP_API_KEY`），然后在客户端发送相同的值：
 
 ```json
 {
@@ -93,23 +93,23 @@ npx -y obsidian-mcp@2 serve --vault notes=/absolute/path/to/vault --transport ht
 
 `OBSIDIAN_MCP_HTTP_TOKEN` 只用于配置服务器。MCP 客户端配置文件不是 shell 脚本，因此请在 header 中直接写入 token（或使用客户端自己的密钥展开机制），不要写 `$OBSIDIAN_MCP_HTTP_TOKEN`。
 
-| 参数                        | 默认值          | 用途                                                              |
-| --------------------------- | --------------- | ----------------------------------------------------------------- |
-| `--transport <stdio\|http>` | `stdio`         | 通过 stdio 或 Streamable HTTP 提供服务。                          |
-| `--host <host>`             | `127.0.0.1`     | 绑定的网络接口。                                                  |
-| `--port <port>`             | `8787`          | TCP 端口。`0` 表示选择临时端口，并在 stderr 中报告。             |
-| `--path <path>`             | `/mcp`          | HTTP 端点路径。                                                   |
-| `--allowed-host <hostname>` | 回环地址名称    | 额外接受的 `Host` 主机名（可重复）。                              |
-| `--allowed-origin <origin>` | 回环地址名称    | 额外接受的 `Origin` 主机名（可重复）。                            |
-| `--auth-token <token>`      | 无              | 要求所有非 OPTIONS 请求携带 `Authorization: Bearer <token>`。     |
-| `OBSIDIAN_MCP_HTTP_TOKEN`   | 无              | `--auth-token` 的环境变量形式。                                   |
+| 参数                        | 默认值       | 用途                                                          |
+| --------------------------- | ------------ | ------------------------------------------------------------- |
+| `--transport <stdio\|http>` | `stdio`      | 通过 stdio 或 Streamable HTTP 提供服务。                      |
+| `--host <host>`             | `127.0.0.1`  | 绑定的网络接口。                                              |
+| `--port <port>`             | `8787`       | TCP 端口。`0` 表示选择临时端口，并在 stderr 中报告。          |
+| `--path <path>`             | `/mcp`       | HTTP 端点路径。                                               |
+| `--allowed-host <hostname>` | 回环地址名称 | 额外接受的 `Host` 主机名（可重复）。                          |
+| `--allowed-origin <origin>` | 回环地址名称 | 额外接受的 `Origin` 主机名（可重复）。                        |
+| `--auth-token <token>`      | 无           | 要求所有非 OPTIONS 请求携带 `Authorization: Bearer <token>`。 |
+| `OBSIDIAN_MCP_HTTP_TOKEN`   | 无           | `--auth-token` 的环境变量形式；`MCP_API_KEY` 同样可用。       |
 
 HTTP 安全说明：
 
 - 服务器默认只绑定回环地址。只有确实需要接受远程连接时，才绑定其他网络接口。
 - `Host` 和 `Origin` 校验默认只接受 localhost 和回环地址名称，用于阻止 DNS 重绑定攻击。只为可信名称添加 `--allowed-host` 或 `--allowed-origin`。绑定 `0.0.0.0` 或 `::` 等通配地址时，还必须通过 `--allowed-host` 传入公网主机名，否则发往该主机名的请求会被拒绝。
 - Origin 匹配只比较主机名，忽略 scheme 和端口，因此任何由允许的主机名提供的页面都可以调用该端点。不要只依赖 Origin 校验，应同时配置 Bearer Token。
-- 除非配置了 `--auth-token` 或 `OBSIDIAN_MCP_HTTP_TOKEN`，否则 HTTP 客户端不会经过鉴权。把端点暴露到本机之外前，请使用 token，并放在带 TLS 的反向代理之后。
+- 除非配置了 `--auth-token`、`OBSIDIAN_MCP_HTTP_TOKEN` 或 `MCP_API_KEY`，否则 HTTP 客户端不会经过鉴权。把端点暴露到本机之外前，请使用 token，并放在带 TLS 的反向代理之后。
 - 默认 `--legacy serve` 模式下，2025 版协议的客户端按请求无状态处理；端点上的 `GET` 和 `DELETE` 返回 `405`。
 
 用 `curl` 对端点做一次冒烟测试：
@@ -120,6 +120,73 @@ curl -i http://127.0.0.1:8787/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'
 ```
+
+## Vault 文件资源与上传
+
+### 以 MCP resource 读取文件
+
+HTTP 和 stdio transport 都会注册一个 resource template，可通过 `resources/templates/list` 发现：
+
+```text
+obsidian-mcp://vaults/{vaultId}/files/{vault 相对路径}
+```
+
+例如 `obsidian-mcp://vaults/notes/files/publish/wechat-main/assets/demo/cover.png`。
+
+- 文本文件（`.md`、`.txt`、`.json`、`.yaml`、`.csv`、`.html`、`.xml` 等）以 `text` 返回。
+- `image/png`、`image/jpeg`、`image/webp`、`image/gif`、`image/svg+xml`、`application/pdf` 以 base64 `blob` 返回，并带正确的 `mimeType`。
+- 读取为只读操作，复用与工具相同的 vault 路径校验，并受 `RESOURCE_MAX_BYTES` 限制（默认 10 MB）。文件不存在或超过限制时返回带可操作说明的 MCP resource 错误。
+- 原有 `obsidian-mcp://vaults` 资源保持不变。
+
+### 通过 HTTP 上传文件
+
+`POST /upload` 与 MCP 共用同一个 HTTP server，请求体为 `multipart/form-data`，并要求与 MCP 相同的 Bearer Token：
+
+| 字段        | 必填 | 说明                                |
+| ----------- | ---- | ----------------------------------- |
+| `vault`     | 是   | vault id，例如 `notes`。            |
+| `path`      | 是   | vault 相对路径，包含文件名。        |
+| `file`      | 是   | 文件内容。                          |
+| `overwrite` | 否   | `true` 覆盖已有文件；默认 `false`。 |
+
+```bash
+export MCP_API_KEY=replace-me
+curl -sS -X POST http://127.0.0.1:8811/upload \
+  -H "Authorization: Bearer $MCP_API_KEY" \
+  -F vault=notes \
+  -F "path=publish/wechat-main/assets/demo/cover.png" \
+  -F file=@./cover.png
+```
+
+成功时返回规范化路径、字节数、SHA-256 与识别出的 MIME 类型：
+
+```json
+{
+  "vault": "notes",
+  "path": "publish/wechat-main/assets/demo/cover.png",
+  "bytes": 12345,
+  "sha256": "…",
+  "mimeType": "image/png"
+}
+```
+
+行为与限制：
+
+- 允许 PNG、JPEG、WebP、GIF、SVG、PDF；其他扩展名返回 `415`。
+- `UPLOAD_MAX_BYTES` 控制请求大小限制（默认 20 MB），超出返回 `413`。
+- 自动创建缺失的父目录。文件先写入同目录临时文件再 rename，POSIX 下最终权限为 `0644`。
+- 未显式传入 `overwrite=true` 时不会覆盖已有文件，冲突返回 `409`。
+- 路径校验与工具完全一致：绝对路径、`..`、反斜杠、`.obsidian`、`.obsidian-mcp` 及其他保留目录返回 `400`。
+- 未配置 token 时 `/upload` 始终返回 `401`。只有以 HTTP 模式启动时该路由才存在（`--transport http`；上面的示例使用 `--port 8811`）。
+
+| 状态码 | 含义                                       |
+| ------ | ------------------------------------------ |
+| `400`  | 字段缺失/非法、路径不安全或 multipart 错误 |
+| `401`  | Bearer Token 缺失或错误                    |
+| `404`  | vault id 未配置                            |
+| `409`  | 目标已存在且未传 `overwrite=true`          |
+| `413`  | 请求体超过 `UPLOAD_MAX_BYTES`              |
+| `415`  | 扩展名不在允许的 MIME 列表中               |
 
 ## Docker
 
@@ -146,20 +213,20 @@ docker run --rm -p 8787:8787 \
 
 ## 工具
 
-| 工具                        | 用途                                                                 |
-| --------------------------- | -------------------------------------------------------------------- |
-| `obsidian_list_vaults`      | 列出已配置的 vault id，不暴露宿主机路径。                            |
-| `obsidian_read_note`        | 读取笔记的一页内容，并返回其 SHA-256 `etag`。                        |
-| `obsidian_create_note`      | 原子创建笔记，不覆盖已有文件。                                       |
-| `obsidian_edit_note`        | 追加、前置或精确替换笔记内容。                                       |
-| `obsidian_delete_note`      | 把笔记移入 MCP 回收站，或在明确确认后永久删除。                      |
-| `obsidian_move_note`        | 移动或重命名笔记，并在同一事务中更新无歧义的反向链接。               |
-| `obsidian_create_directory` | 在 vault 内以事务方式创建目录。                                      |
-| `obsidian_search_vault`     | 搜索正文、文件名或标签，支持有界游标分页。                           |
-| `obsidian_add_tags`         | 原子地为一篇或多篇笔记添加标签。                                     |
-| `obsidian_remove_tags`      | 原子地删除精确、嵌套或通配符匹配的标签。                             |
-| `obsidian_rename_tag`       | 在整个 vault 中原子地重命名标签。                                    |
-| `obsidian_manage_tags`      | 基于同一实现统一处理添加/删除标签。                                  |
+| 工具                        | 用途                                                   |
+| --------------------------- | ------------------------------------------------------ |
+| `obsidian_list_vaults`      | 列出已配置的 vault id，不暴露宿主机路径。              |
+| `obsidian_read_note`        | 读取笔记的一页内容，并返回其 SHA-256 `etag`。          |
+| `obsidian_create_note`      | 原子创建笔记，不覆盖已有文件。                         |
+| `obsidian_edit_note`        | 追加、前置或精确替换笔记内容。                         |
+| `obsidian_delete_note`      | 把笔记移入 MCP 回收站，或在明确确认后永久删除。        |
+| `obsidian_move_note`        | 移动或重命名笔记，并在同一事务中更新无歧义的反向链接。 |
+| `obsidian_create_directory` | 在 vault 内以事务方式创建目录。                        |
+| `obsidian_search_vault`     | 搜索正文、文件名或标签，支持有界游标分页。             |
+| `obsidian_add_tags`         | 原子地为一篇或多篇笔记添加标签。                       |
+| `obsidian_remove_tags`      | 原子地删除精确、嵌套或通配符匹配的标签。               |
+| `obsidian_rename_tag`       | 在整个 vault 中原子地重命名标签。                      |
+| `obsidian_manage_tags`      | 基于同一实现统一处理添加/删除标签。                    |
 
 所有 schema 都是由 Zod 生成的严格 JSON Schema 2020-12 契约。修改类结果会包含 transaction id；工具失败时返回 `isError: true` 和可操作的错误码。
 

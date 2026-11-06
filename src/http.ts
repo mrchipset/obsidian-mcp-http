@@ -4,13 +4,17 @@ import http from "node:http";
 import { hostHeaderValidation, originValidation, toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 
+import { DEFAULT_UPLOAD_MAX_BYTES, readByteLimit } from "./assets/limits.js";
+import { readUploadRequest, storeUpload, UploadRequestError } from "./assets/upload.js";
 import { SERVER_VERSION } from "./constants.js";
 import type { Runtime } from "./runtime.js";
 import { buildServer } from "./server.js";
 import { UserFacingError } from "./utils/diagnostics.js";
+import { ToolFailure } from "./utils/errors.js";
 import type { Logger } from "./utils/logger.js";
 
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+const UPLOAD_PATH = "/upload";
 const DEFAULT_ALLOWED_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "[::1]"];
 const CORS_ALLOW_METHODS = "GET, POST, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS =
@@ -51,6 +55,7 @@ export async function startHttpServer(options: HttpServerOptions): Promise<HttpS
   const validateOrigin = originValidation(allowedOrigins);
   const authToken = options.authToken;
   const authDigest = authToken === undefined ? undefined : sha256Buffer(authToken);
+  const uploadMaxBytes = readByteLimit("UPLOAD_MAX_BYTES", DEFAULT_UPLOAD_MAX_BYTES);
 
   const handler = createMcpHandler(() => buildServer(options.runtime), {
     legacy: options.legacy === "serve" ? "stateless" : "reject",
@@ -76,12 +81,37 @@ export async function startHttpServer(options: HttpServerOptions): Promise<HttpS
     applyCors(req, res, allowedOrigins);
 
     const pathname = requestPathname(req.url);
+    const method = req.method ?? "GET";
+
+    if (pathname === UPLOAD_PATH || pathname === `${UPLOAD_PATH}/`) {
+      if (method === "OPTIONS") {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+      if (method !== "POST") {
+        res.setHeader("Allow", "POST, OPTIONS");
+        sendJson(res, 405, { error: "method_not_allowed" });
+        return;
+      }
+      if (authDigest === undefined || !isAuthorized(req, authDigest)) {
+        res.setHeader("WWW-Authenticate", 'Bearer realm="obsidian-mcp"');
+        sendJson(res, 401, {
+          error: "unauthorized",
+          message:
+            "The upload endpoint requires a bearer token configured with --auth-token, OBSIDIAN_MCP_HTTP_TOKEN, or MCP_API_KEY."
+        });
+        return;
+      }
+      await handleUpload(req, res, options.runtime, logger, uploadMaxBytes);
+      return;
+    }
+
     if (pathname !== endpointPath && pathname !== `${endpointPath}/`) {
       sendJson(res, 404, { error: "not_found" });
       return;
     }
 
-    const method = req.method ?? "GET";
     if (method === "OPTIONS") {
       res.statusCode = 204;
       res.end();
@@ -146,9 +176,17 @@ export async function startHttpServer(options: HttpServerOptions): Promise<HttpS
     host: options.host,
     port: actualPort,
     path: endpointPath,
+    uploadPath: UPLOAD_PATH,
     vaults: options.runtime.registry.ids(),
     version: SERVER_VERSION
   });
+
+  if (authToken === undefined) {
+    logger.log("warn", "http_upload_requires_token", {
+      detail:
+        "POST /upload returns 401 until --auth-token, OBSIDIAN_MCP_HTTP_TOKEN, or MCP_API_KEY is configured."
+    });
+  }
 
   if (options.legacy === "serve") {
     logger.log("info", "http_legacy_stateless", {
@@ -179,6 +217,72 @@ export async function startHttpServer(options: HttpServerOptions): Promise<HttpS
   };
 
   return { url, port: actualPort, close };
+}
+
+async function handleUpload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  runtime: Runtime,
+  logger: Logger,
+  maxBytes: number
+): Promise<void> {
+  let input;
+  try {
+    input = await readUploadRequest(req, maxBytes);
+  } catch (error) {
+    if (error instanceof UploadRequestError) {
+      logUploadRejection(logger, error);
+      sendJson(res, error.status, { error: error.code, message: error.message });
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    const result = await storeUpload(runtime, input);
+    logger.log("info", "upload_stored", {
+      vault: result.vault,
+      path: result.path,
+      bytes: result.bytes,
+      sha256: result.sha256,
+      mimeType: result.mimeType
+    });
+    sendJson(res, 200, result);
+  } catch (error) {
+    if (error instanceof UploadRequestError) {
+      logUploadRejection(logger, error);
+      sendJson(res, error.status, { error: error.code, message: error.message });
+      return;
+    }
+    if (error instanceof ToolFailure) {
+      const status = uploadStatusFor(error.code);
+      logger.log("warn", "upload_rejected", { status, code: error.code });
+      sendJson(res, status, { error: error.code, message: error.message });
+      return;
+    }
+    throw error;
+  }
+}
+
+function logUploadRejection(logger: Logger, error: UploadRequestError): void {
+  logger.log("warn", "upload_rejected", { status: error.status, code: error.code });
+}
+
+function uploadStatusFor(code: ToolFailure["code"]): number {
+  switch (code) {
+    case "VAULT_NOT_FOUND":
+      return 404;
+    case "PATH_REJECTED":
+    case "SYMLINK_NOT_ALLOWED":
+    case "INVALID_ARGUMENT":
+      return 400;
+    case "ALREADY_EXISTS":
+      return 409;
+    case "INPUT_TOO_LARGE":
+      return 413;
+    default:
+      return 500;
+  }
 }
 
 async function closeServer(
