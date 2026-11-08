@@ -29,7 +29,7 @@ test("tool input schemas return actionable issues and apply documented defaults"
       invalidEdit.error.issues.map((issue) => [issue.path.join("."), issue.message]),
       [
         ["path", "Path cannot be empty."],
-        ["operation", "operation must be one of 'append', 'prepend', or 'replace'."]
+        ["operation", "operation must be one of 'append', 'prepend', 'replace', or 'patch'."]
       ]
     );
   }
@@ -74,6 +74,68 @@ test("tool input schemas return actionable issues and apply documented defaults"
     },
     { mode: "content", case_sensitive: false, limit: 50 }
   );
+});
+
+test("edit-note patch parameters are conditionally required and scoped", async () => {
+  const definitions = await definitionsForTest();
+  const edit = findDefinition(definitions, "obsidian_edit_note");
+
+  const missingOld = edit.inputSchema.safeParse({
+    vault: "test",
+    path: "Note.md",
+    operation: "patch",
+    new_string: "x"
+  });
+  assert.equal(missingOld.success, false);
+  if (!missingOld.success) {
+    assert.deepEqual(
+      missingOld.error.issues.map((issue) => [issue.path.join("."), issue.message]),
+      [["old_string", "old_string is required when operation is 'patch'."]]
+    );
+  }
+
+  const oldOnAppend = edit.inputSchema.safeParse({
+    vault: "test",
+    path: "Note.md",
+    operation: "append",
+    content: "x",
+    old_string: "a"
+  });
+  assert.equal(oldOnAppend.success, false);
+  if (!oldOnAppend.success) {
+    assert.deepEqual(
+      oldOnAppend.error.issues.map((issue) => [issue.path.join("."), issue.message]),
+      [["old_string", "old_string is only valid with operation 'patch'."]]
+    );
+  }
+
+  const baseOnAppend = edit.inputSchema.safeParse({
+    vault: "test",
+    path: "Note.md",
+    operation: "append",
+    content: "x",
+    base_chars: 1
+  });
+  assert.equal(baseOnAppend.success, false);
+  if (!baseOnAppend.success) {
+    assert.deepEqual(
+      baseOnAppend.error.issues.map((issue) => [issue.path.join("."), issue.message]),
+      [["base_chars", "base_chars is only valid with operation 'replace'."]]
+    );
+  }
+
+  const missingContent = edit.inputSchema.safeParse({
+    vault: "test",
+    path: "Note.md",
+    operation: "replace"
+  });
+  assert.equal(missingContent.success, false);
+  if (!missingContent.success) {
+    assert.deepEqual(
+      missingContent.error.issues.map((issue) => [issue.path.join("."), issue.message]),
+      [["content", "content is required for append, prepend, and replace."]]
+    );
+  }
 });
 
 test("content schemas enforce the UTF-8 byte limit before a handler runs", async () => {

@@ -146,7 +146,7 @@ test("modern stdio server advertises complete schemas and executes all twelve to
     assert.match(invalidEditText, /path: Path cannot be empty\./u);
     assert.match(
       invalidEditText,
-      /operation: operation must be one of 'append', 'prepend', or 'replace'\./u
+      /operation: operation must be one of 'append', 'prepend', 'replace', or 'patch'\./u
     );
 
     const unconfirmedDelete = await client.callTool({
